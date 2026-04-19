@@ -263,7 +263,7 @@ class HLSModule:
                 # wrap_io=True has already linearized array indexing in
                 # generate_input_output_buffers, so we don't need to do it again
                 flatten = False if platform == "vivado_hls" else (not wrap_io)
-                success = allo_d.emit_vhls(self.module, buf, flatten=flatten)
+                success = allo_d.emit_vhls(self.module, buf)
 
         if not success:
             raise RuntimeError(

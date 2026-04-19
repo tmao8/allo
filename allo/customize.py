@@ -958,17 +958,18 @@ class Schedule:
         loop_hdl = allo_d.CreateLoopHandleOp(op_hdl.result, StringAttr.get(axis), ip=ip)
         memref_type = MemRefType.get((1,), F32Type.get())
 
+        func_name = func.name.value
         def find_reuse_buffers(res):
-            for func in self.module.body.operations:
-                if isinstance(func, func_d.FuncOp):
-                    for op in func.entry_block.operations:
+            for func_op in self.module.body.operations:
+                if isinstance(func_op, func_d.FuncOp) and func_op.name.value == func_name:
+                    for op in func_op.entry_block.operations:
                         if (
                             isinstance(op, memref_d.AllocOp)
                             and "name" in op.attributes
                             and band_name + "_reuse"
                             in StringAttr(op.attributes["name"]).value
                         ):
-                            res.append(op)
+                            res.append(StringAttr(op.attributes["name"]).value)
 
         prev_reuse_buffers = []
         find_reuse_buffers(prev_reuse_buffers)
@@ -982,8 +983,8 @@ class Schedule:
         if len(new_reuse_buffers) != 1:
             raise RuntimeError("Reuse buffer not found")
         return MockBuffer(
-            self.top_func_name,
-            StringAttr(new_reuse_buffers[-1].attributes["name"]).value,
+            func_name,
+            new_reuse_buffers[-1],
         )
 
     @wrapped_apply
@@ -1327,6 +1328,36 @@ class Schedule:
                 wrap_io=wrap_io,
             )
         raise NotImplementedError(f"Target {target} is not supported")
+
+    def build_cosim_model(self, project, api_key=None):
+        from allo.backend.zero_cosim.auto_agent import build_model_via_agent
+        import os
+        if api_key is None:
+            api_key = os.environ.get("OPENROUTER_API_KEY")
+        # Ensure we point to the actual HLS solution directory
+        solution_dir = os.path.join(project, "out.prj", "solution1")
+        return build_model_via_agent(solution_dir, os.getcwd(), api_key)
+
+    def predict_performance(self, baseline_model_code, api_key=None):
+        from allo.backend.zero_cosim.auto_agent import estimate_customization
+        import os
+        import json
+        if api_key is None:
+            api_key = os.environ.get("OPENROUTER_API_KEY")
+        
+        customizations = []
+        for fn_name, args, kwargs in self.primitive_sequences:
+            args_str = [getattr(a, "name", str(a)) for a in args]
+            kwargs_str = {k: getattr(v, "name", str(v)) for k, v in kwargs.items()}
+            customizations.append({"primitive": fn_name, "args": args_str, "kwargs": kwargs_str})
+            
+        cls = estimate_customization(
+            baseline_model_code=baseline_model_code,
+            customizations=customizations,
+            api_key=api_key
+        )
+        # Attempt to infer the default solution dir or just pass "."
+        return cls(solution_dir=".")
 
 
 def customize(

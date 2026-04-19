@@ -237,9 +237,14 @@ def get_affine_loop_nests(func):
                 band.add_loop(func_name, band_name, name, op)
                 DFS(op.body.operations, band)
             elif isinstance(op, affine_d.AffineIfOp):
-                DFS(op.then_block.operations, band)
-                if op.else_block is not None:
+                if hasattr(op, "then_block"):
+                    DFS(op.then_block.operations, band)
+                else:
+                    DFS(op.thenRegion.blocks[0].operations, band)
+                if hasattr(op, "else_block") and op.else_block is not None:
                     DFS(op.else_block.operations, band)
+                elif hasattr(op, "elseRegion") and len(op.elseRegion.blocks) > 0:
+                    DFS(op.elseRegion.blocks[0].operations, band)
             elif isinstance(op, scf_d.IfOp):
                 DFS(op.then_block.operations, band)
                 if op.else_block is not None:
