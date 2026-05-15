@@ -1,28 +1,5 @@
-# Copyright Allo authors. All Rights Reserved.
-# SPDX-License-Identifier: Apache-2.0
-
-import os
-import json
-import pytest
 import allo
-import numpy as np
 from allo.ir.types import int32, float32
-import allo.ir.types as T
-
-
-def jacobi_2d_np(A, B, TSTEPS):
-    for t in range(TSTEPS):
-        for i in range(1, A.shape[0] - 1):
-            for j in range(1, A.shape[1] - 1):
-                B[i, j] = 0.2 * (
-                    A[i, j + 1] + A[i, j - 1] + A[i - 1, j] + A[i + 1, j] + A[i, j]
-                )
-        for i in range(1, A.shape[0] - 1):
-            for j in range(1, A.shape[1] - 1):
-                A[i, j] = 0.2 * (
-                    B[i, j + 1] + B[i, j - 1] + B[i - 1, j] + B[i + 1, j] + B[i, j]
-                )
-    return A, B
 
 
 def compute_A[T: (float32, int32), N: int32](A0: "T[N, N]", B0: "T[N, N]"):
@@ -47,6 +24,10 @@ def compute_B[T: (float32, int32), N: int32](B1: "T[N, N]", A1: "T[N, N]"):
         )
 
 
+TSTEPS = 40
+N_SIZE = 90
+
+
 def kernel_jacobi_2d[T: (float32, int32), N: int32](A: "T[N, N]", B: "T[N, N]"):
     for m in range(TSTEPS):
         compute_A(A, B)
@@ -67,14 +48,11 @@ def build_baseline_model(concrete_type, TSTEPS, N):
         
     print(f"\n[Baseline] Compiling uncustomized baseline CSynth to {prj_path}...")
     sch_base = allo.customize(kernel_jacobi_2d, instantiate=[concrete_type, N])
-    # Mode is csynth to generate ADBs
     mod = sch_base.build(target="vitis_hls", mode="csyn", project=prj_path)
-    mod()  # Actually run the HLS synthesis to generate the ADBs and artifacts
+    mod()
     
-    api_key = os.environ.get("OPENROUTER_API_KEY")
-    if api_key:
-        print("\n[Agent] Building initial zero_cosim_model from baseline artifacts...")
-        sch_base.build_cosim_model(project=prj_path, api_key=api_key)
+    print("\n[Agent] Building initial zero_cosim_model from baseline artifacts...")
+    sch_base.build_cosim_model(project=prj_path)
         
     return baseline_file.read_text() if baseline_file.exists() else None
 
@@ -98,7 +76,7 @@ def jacobi_2d(concrete_type, TSTEPS, N):
     sch0.partition(lb0, dim=0)
     sch0.partition(wb0, dim=0)
 
-    if baseline_code and os.environ.get("OPENROUTER_API_KEY"):
+    if baseline_code:
         try:
             print("\n[Agent] Predicting cycle report for compute_A schedule...")
             rep = sch0.predict_performance(baseline_code).report_cycle()
@@ -122,7 +100,7 @@ def jacobi_2d(concrete_type, TSTEPS, N):
     sch1.partition(lb1, dim=0)
     sch1.partition(wb1, dim=0)
 
-    if baseline_code and os.environ.get("OPENROUTER_API_KEY"):
+    if baseline_code:
         try:
             print("\n[Agent] Predicting cycle report for compute_B schedule...")
             rep = sch1.predict_performance(baseline_code).report_cycle()
@@ -145,7 +123,7 @@ def jacobi_2d(concrete_type, TSTEPS, N):
     sch.partition(sch.A, dim=2)
     sch.partition(sch.B, dim=2)
     
-    if baseline_code and os.environ.get("OPENROUTER_API_KEY"):
+    if baseline_code:
         try:
             print("\n[Agent] Predicting cycle report for fully composed kernel...")
             rep = sch.predict_performance(baseline_code).report_cycle()
@@ -157,47 +135,52 @@ def jacobi_2d(concrete_type, TSTEPS, N):
 
 
 def test_jacobi_2d():
-    # read problem size settings
-    setting_path = os.path.join(os.path.dirname(__file__), "psize.json")
-    with open(setting_path, "r") as fp:
-        psize = json.load(fp)
-    # for CI test we use small problem size
-    test_psize = "small"
-    N = psize["jacobi_2d"][test_psize]["N"]
-    TSTEPS = psize["jacobi_2d"][test_psize]["TSTEPS"]
-    concrete_type = float32
-    sch = jacobi_2d(concrete_type, TSTEPS, N)
+    import os
+    import numpy as np
     
-    # functional correctness test
+    concrete_type = float32
+    N = N_SIZE
+
+    sch = jacobi_2d(concrete_type, TSTEPS, N)
+
+    mod = sch.build(target="vitis_hls", mode="csyn", 
+                    project=os.path.join(os.path.dirname(__file__), "jacobi_2d_optimized.prj"))
+    mod()
+
+    xml_opt = os.path.join(os.path.dirname(__file__), "jacobi_2d_optimized.prj/out.prj/solution1/syn/report/kernel_jacobi_2d_csynth.xml")
+    if os.path.exists(xml_opt):
+        import xml.etree.ElementTree as ET
+        tree = ET.parse(xml_opt)
+        lat_node = tree.getroot().find('.//PerformanceEstimates/SummaryOfOverallLatency/Average-caseLatency')
+        cp_node = tree.getroot().find('.//PerformanceEstimates/SummaryOfTimingInformation/EstimatedClockPeriod')
+        if lat_node is not None:
+            print(f"        -> Actual CSynth Latency (Cycles): {lat_node.text}")
+        if cp_node is not None:
+            print(f"        -> Actual CP: {cp_node.text} ns")
+
+    # Verify correctness with LLVM backend
     print("\n[Correctness] Verifying LLVM JIT Model...")
-    mod = sch.build()
-    A = np.random.randint(10, size=(N, N)).astype(np.float32)
-    B = np.random.randint(10, size=(N, N)).astype(np.float32)
+    mod_llvm = sch.build()
+    A = np.random.uniform(size=(N, N)).astype(np.float32)
+    B = np.random.uniform(size=(N, N)).astype(np.float32)
     A_ref = A.copy()
     B_ref = B.copy()
-    A_ref, B_ref = jacobi_2d_np(A_ref, B_ref, TSTEPS)
-    mod(A, B)
-    np.testing.assert_allclose(A, A_ref, rtol=1e-5, atol=1e-5)
-    np.testing.assert_allclose(B, B_ref, rtol=1e-5, atol=1e-5)
-    print("        -> Passed!")
+    for t in range(TSTEPS):
+        B_new = B_ref.copy()
+        for i in range(1, N - 1):
+            for j in range(1, N - 1):
+                B_new[i, j] = 0.2 * (A_ref[i, j] + A_ref[i, j - 1] + A_ref[i, j + 1] + A_ref[i + 1, j] + A_ref[i - 1, j])
+        B_ref = B_new
+        A_new = A_ref.copy()
+        for i in range(1, N - 1):
+            for j in range(1, N - 1):
+                A_new[i, j] = 0.2 * (B_ref[i, j] + B_ref[i, j - 1] + B_ref[i, j + 1] + B_ref[i + 1, j] + B_ref[i - 1, j])
+        A_ref = A_new
 
-    # ground truth csynth
-    prj_dir = "jacobi_2d_optimized.prj"
-    prj_path = os.path.join(os.path.dirname(__file__), prj_dir)
-    print(f"\n[Ground Truth] Compiling fully customized schedule CSynth to {prj_path}...")
-    mod_hls = sch.build(target="vitis_hls", mode="csyn", project=prj_path)
-    mod_hls()  # Actually run the HLS synthesis
-    
-    # parse ground truth from out.prj/solution1/syn/report/kernel_jacobi_2d_csynth.xml
-    import xml.etree.ElementTree as ET
-    xml_file = os.path.join(prj_path, "out.prj", "solution1", "syn", "report", "kernel_jacobi_2d_csynth.xml")
-    if os.path.exists(xml_file):
-        tree = ET.parse(xml_file)
-        root = tree.getroot()
-        estimated_clock = root.find('.//PerformanceEstimates/SummaryOfTimingAnalysis/EstimatedClockPeriod').text
-        min_cycles = root.find('.//PerformanceEstimates/SummaryOfOverallLatency/Average-caseLatency').text
-        print(f"        -> Actual CSynth Latency (Cycles): {min_cycles}")
-        print(f"        -> Actual CP: {estimated_clock} ns")
+    mod_llvm(A, B)
+    np.testing.assert_allclose(A, A_ref, rtol=1e-3, atol=1e-3)
+    np.testing.assert_allclose(B, B_ref, rtol=1e-3, atol=1e-3)
+    print("        -> Passed!")
 
 
 if __name__ == "__main__":

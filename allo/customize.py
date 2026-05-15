@@ -1329,33 +1329,82 @@ class Schedule:
             )
         raise NotImplementedError(f"Target {target} is not supported")
 
-    def build_cosim_model(self, project, api_key=None):
-        from allo.backend.zero_cosim.auto_agent import build_model_via_agent
+    def build_cosim_model(self, project, api_key=None, backend=None):
+        """Build a zero-cosim analytical model from HLS synthesis artifacts.
+        
+        Args:
+            project: Path to the HLS project directory.
+            api_key: OpenRouter API key (only needed if using 'openrouter' backend).
+            backend: 'openrouter', 'claude_cli', or None (auto-detect).
+        """
         import os
-        if api_key is None:
-            api_key = os.environ.get("OPENROUTER_API_KEY")
-        # Ensure we point to the actual HLS solution directory
+        from allo.backend.zero_cosim.auto_agent import _find_claude_cli
         solution_dir = os.path.join(project, "out.prj", "solution1")
-        return build_model_via_agent(solution_dir, os.getcwd(), api_key)
+        
+        if backend is None:
+            backend = os.environ.get("ZERO_COSIM_BACKEND")
+            
+        if backend == "claude_cli" or (backend is None and _find_claude_cli()):
+            from allo.backend.zero_cosim.auto_agent import build_model_via_claude_cli
+            return build_model_via_claude_cli(solution_dir, os.getcwd())
+        else:
+            from allo.backend.zero_cosim.auto_agent import build_model_via_agent
+            if api_key is None:
+                api_key = os.environ.get("OPENROUTER_API_KEY")
+            if not api_key and backend == "openrouter":
+                raise ValueError("OPENROUTER_API_KEY must be set to use 'openrouter' backend.")
+            if not api_key and not _find_claude_cli():
+                 raise ValueError(
+                    "No backend available. Install Claude CLI (curl -fsSL https://claude.ai/install.sh | bash) "
+                    "or set OPENROUTER_API_KEY."
+                )
+            return build_model_via_agent(solution_dir, os.getcwd(), api_key)
 
-    def predict_performance(self, baseline_model_code, api_key=None):
-        from allo.backend.zero_cosim.auto_agent import estimate_customization
+    def predict_performance(self, baseline_model_code, api_key=None, backend=None):
+        """Predict the performance impact of applied customizations.
+        
+        Args:
+            baseline_model_code: Python source of the baseline ZeroCosimModel.
+            api_key: OpenRouter API key (only needed if using 'openrouter' backend).
+            backend: 'openrouter', 'claude_cli', or None (auto-detect).
+        """
         import os
         import json
-        if api_key is None:
-            api_key = os.environ.get("OPENROUTER_API_KEY")
+        from allo.backend.zero_cosim.auto_agent import _find_claude_cli
         
         customizations = []
         for fn_name, args, kwargs in self.primitive_sequences:
             args_str = [getattr(a, "name", str(a)) for a in args]
             kwargs_str = {k: getattr(v, "name", str(v)) for k, v in kwargs.items()}
             customizations.append({"primitive": fn_name, "args": args_str, "kwargs": kwargs_str})
-            
-        cls = estimate_customization(
-            baseline_model_code=baseline_model_code,
-            customizations=customizations,
-            api_key=api_key
-        )
+        
+        if backend is None:
+            backend = os.environ.get("ZERO_COSIM_BACKEND")
+
+        if backend == "claude_cli" or (backend is None and _find_claude_cli()):
+            from allo.backend.zero_cosim.auto_agent import estimate_customization_via_claude_cli
+            cls = estimate_customization_via_claude_cli(
+                baseline_model_code=baseline_model_code,
+                customizations=customizations,
+                mlir_ir=str(self.module),
+            )
+        else:
+            from allo.backend.zero_cosim.auto_agent import estimate_customization
+            if api_key is None:
+                api_key = os.environ.get("OPENROUTER_API_KEY")
+            if not api_key and backend == "openrouter":
+                raise ValueError("OPENROUTER_API_KEY must be set to use 'openrouter' backend.")
+            if not api_key and not _find_claude_cli():
+                raise ValueError(
+                    "No backend available. Install Claude CLI (curl -fsSL https://claude.ai/install.sh | bash) "
+                    "or set OPENROUTER_API_KEY."
+                )
+            cls = estimate_customization(
+                baseline_model_code=baseline_model_code,
+                customizations=customizations,
+                mlir_ir=str(self.module),
+                api_key=api_key
+            )
         # Attempt to infer the default solution dir or just pass "."
         return cls(solution_dir=".")
 

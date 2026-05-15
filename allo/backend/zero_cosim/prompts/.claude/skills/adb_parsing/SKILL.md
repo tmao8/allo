@@ -5,12 +5,14 @@ This skill allows the agent to extract cycle-accurate scheduling data from the H
 
 ## Core Extraction logic
 
-### 1. Identify ADB Files
-Look in the `.autopilot/db/` directory for files named `[module_name].sched.adb.xml`. These contain the FSM (Finite State Machine) and operation schedule.
+### 1. Identify Target Schedule Files
+Look in the `.autopilot/db/` directory. Your primary target should be `[module_name].verbose.sched.rpt`. This is a human-readable text file that contains the exact cycle-by-cycle FSM operation schedule mapped to source lines.
+If programmatic XML traversal is absolutely necessary, fallback to `[module_name].sched.adb.xml`.
 
 ### 2. Parse State Machine (FSM)
-- Find the `<state_list>` tag.
-- Each `<state id="N">` represents a set of operations that happen at a specific cycle (or set of cycles) in the module's execution.
+- Open the `*.verbose.sched.rpt` file.
+- Look for blocks labeled `State N`. Each block lists the operations scheduled to execute in that exact clock cycle.
+- **CRITICAL PARALLELISM RULE**: If multiple function calls (e.g., `call load_buf0`, `call load_buf1`) or loops are scheduled to begin in the *exact same State* (e.g. State 1), they execute in **PARALLEL** in the hardware! You MUST NOT sequentially add their latencies. Their combined elapsed time is `max(latency1, latency2)`. They are only sequential if they are triggered in *different* states or if one state explicitly waits for another to finish.
 - Map the total number of states to the module latency.
 
 ### 3. Extract Stream/Port Offsets (Static Alignment)
